@@ -7,59 +7,58 @@
 # which accompanies this distribution, and is available at
 # http://www.apache.org/licenses/LICENSE-2.0
 ##############################################################################
-- name: Install exo service
-  become: true
+- name: Install uv
   hosts: all
   gather_facts: true
   tasks:
-    - name: Install dependencies
-      ansible.builtin.package:
-        name: libgl1
-      vars:
-       ansible_python_interpreter: /usr/bin/python3.10
-    - name: Get the Python version
-      set_fact:
-        python_version: "{{ ansible_python.version.major }}.{{ ansible_python.version.minor }}"
-    - block:
-      - name: Add deadsnakes ppa
-        ansible.builtin.apt_repository:
-          repo: ppa:deadsnakes/ppa
-      - name: Install dependencies
-        ansible.builtin.package:
-          name: python3.12
-      - name: Select Python 3.12
-        community.general.alternatives:
-          name: python
-          path: /usr/bin/python3.12
-          link: /usr/bin/python3
-      - name: Fix CNF Update DB file
-        ansible.builtin.lineinfile:
-          path: /usr/lib/cnf-update-db
-          regexp: '^#!/usr/bin/python3'
-          line: "#!/usr/bin/python{{ python_version }}"
-      when: python_version is version('3.12', '<')
-    - name: check to see if pip is already installed
-      command: "pip --version"
+    - name: check to see if uv is already installed
+      command: "uv --version"
       ignore_errors: true
-      register: pip_is_installed
+      register: uv_is_installed
       changed_when: false
+      environment:
+        PATH: "{{ ansible_env.HOME}}/.local/bin"
     - block:
-       - name: download get-pip.py
+       - name: download install.sh
          get_url:
-           url: https://bootstrap.pypa.io/get-pip.py
+           url: https://astral.sh/uv/install.sh
            dest: /tmp
-       - name: install pip
-         command: "python3 /tmp/get-pip.py"
-       - name: delete get-pip.py
+           mode: a+x
+       - name: install uv
+         script: /tmp/uv-installer.sh
+       - name: delete install.sh
          file:
            state: absent
-           path: /tmp/get-pip.py
-      when: pip_is_installed.rc != 0
-    - name: Install exo binary
-      ansible.builtin.pip:
-        name: git+https://github.com/exo-explore/exo.git
+           path: /tmp/uv-install.sh
+      when: uv_is_installed.rc != 0
+- name: Install python
+  hosts: all
+  gather_facts: true
+  vars:
+    python_version: 3.12.9
+  tasks:
+    - name: Install python
+      ansible.builtin.command: "{{ ansible_env.HOME}}/.local/bin/uv python install {{ python_version }} --default --preview --no-progress"
+- name: Install exo
+  hosts: all
+  gather_facts: true
+  vars:
+    min_python_version: 3.12
+  tasks:
+    - name: Install dependencies
+      become: true
+      ansible.builtin.package:
+        name: libgl1
+    - name: Copy python requirements file
+      ansible.builtin.copy:
+        src: requeriments.txt
+        dest: /tmp/requeriments.txt
+    - name: Install exo binaries
+      become: true
+      ansible.builtin.command: "{{ ansible_env.HOME}}/.local/bin/uv pip sync /tmp/requeriments.txt --target /opt/exo --python-version {{ min_python_version }} --no-progress"
     - name: Create the systemd service file
-      copy:
+      become: true
+      ansible.builtin.copy:
         dest: /etc/systemd/system/exo.service
         content: |
           [Unit]
@@ -67,17 +66,22 @@
           After=network.target
 
           [Service]
-          ExecStart=/usr/local/bin/exo
+          Type=simple
+          User=root
+          Environment="PYTHONPATH=/opt/exo/"
+          ExecStart=/opt/exo/bin/exo --disable-tui
           Restart=always
 
           [Install]
           WantedBy=multi-user.target
         mode: '0644'
     - name: Reload systemd to pick up the new service
+      become: true
       systemd:
         daemon_reload: yes
-#    - name: Enable and start the service
-#      systemd:
-#        name: exo.service
-#        enabled: yes
-#        state: started
+    - name: Enable and start the service
+      become: true
+      systemd:
+        name: exo.service
+        enabled: yes
+        state: started
